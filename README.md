@@ -12,10 +12,8 @@ GitHub Pages serves the `docs/` folder on `main`. The landing page sends players
 
 ## Versions
 
-- **Latest:** [v0.1 prototype](https://bryee10.github.io/noise_complaint_builds/prototype-v1/) (`docs/prototype-v1/`) — self-contained browser build
-- **Older:** [v0.1 prototype](https://bryee10.github.io/noise_complaint_builds/prototype-v1/) — same browser build, listed until a newer one ships
-
-The next build will be a Godot web export in `docs/v0.2/`. To make it the newest, add that folder and change the two `LATEST` paths in `docs/index.html` from `prototype-v1/` to `v0.2/`. Leave the v0.1 prototype in the older-versions list.
+- **Latest:** [v0.2 Godot rebuild](https://bryee10.github.io/noise_complaint_builds/v0.2/) (`docs/v0.2/`) — Godot 4.7.2 web export. The first load downloads about 60-110 MB; Wi-Fi is recommended.
+- **Older:** [v0.1 browser prototype](https://bryee10.github.io/noise_complaint_builds/prototype-v1/) (`docs/prototype-v1/`) — self-contained browser build
 
 ## Copyright
 
