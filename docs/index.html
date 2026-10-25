@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<meta name="theme-color" content="#101018">
+<meta name="description" content="Play Noise Complaint, an upstairs-neighbor noise simulator.">
+<title>Noise Complaint</title>
+<!--
+  Newest build. This folder is where the landing page sends players.
+  When the Godot web export ships, change both LATEST paths below
+  from prototype-v1/ to v0.2/. Leave the v0.1 prototype link in
+  Older versions.
+-->
+<!-- LATEST -->
+<meta http-equiv="refresh" content="0; url=prototype-v1/">
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; min-height: 100%; }
+  body {
+    background: #101018;
+    color: #f4f4f8;
+    font: 18px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  main {
+    max-width: 36rem;
+    margin: 0 auto;
+    padding: max(1.25rem, env(safe-area-inset-top)) max(1.25rem, env(safe-area-inset-right)) 3rem max(1.25rem, env(safe-area-inset-left));
+  }
+  .eyebrow {
+    margin: 0 0 .4rem;
+    font-size: .8rem;
+    letter-spacing: .14em;
+    text-transform: uppercase;
+    color: #9fd3ff;
+  }
+  h1 {
+    margin: 0;
+    font-size: clamp(2rem, 9vw, 3rem);
+    line-height: 1.05;
+    font-style: italic;
+    color: #ffde59;
+  }
+  .lead { margin: .9rem 0 1.25rem; }
+  a { color: #ffde59; }
+  a.play {
+    display: inline-block;
+    margin: .25rem 0 1.75rem;
+    padding: .9rem 1.25rem;
+    min-height: 3rem;
+    background: #ffde59;
+    color: #1a1a1a;
+    font-weight: 800;
+    text-decoration: none;
+    border-radius: 14px;
+    box-shadow: 0 5px 0 #b38f1a;
+  }
+  a.play:hover { filter: brightness(1.05); }
+  a.play:focus-visible, a:focus-visible {
+    outline: 3px solid #fff;
+    outline-offset: 3px;
+  }
+  h2 {
+    font-size: 1rem;
+    letter-spacing: .08em;
+    text-transform: uppercase;
+    margin: 0 0 .7rem;
+  }
+  ul { margin: 0; padding: 0; list-style: none; }
+  li { margin: 0 0 .85rem; }
+  li span { display: block; color: #b7b7c8; font-size: .95rem; }
+  footer {
+    margin-top: 2.25rem;
+    color: #9a9aad;
+    font-size: .85rem;
+  }
+</style>
+<script>
+  // Instant redirect that replaces this page in history, so Back does not bounce.
+  // The path comes from the LATEST meta refresh above.
+  (function () {
+    var meta = document.querySelector('meta[http-equiv="refresh"]');
+    var match = meta && /url=([^;]+)/i.exec(meta.content);
+    if (match) location.replace(match[1].trim());
+  })();
+</script>
+</head>
+<body>
+<main>
+  <p class="eyebrow">Upstairs-neighbor noise simulator</p>
+  <h1>Noise Complaint</h1>
+  <p class="lead">Taking you to the latest build. If you are not redirected, use the button.</p>
+  <!-- LATEST -->
+  <p><a class="play" href="prototype-v1/">Play the latest build</a></p>
+  <h2>Older versions</h2>
+  <ul>
+    <li>
+      <a href="prototype-v1/">v0.1 prototype</a>
+      <span>Self-contained browser build</span>
+    </li>
+  </ul>
+  <footer>Copyright (c) 2026 Brian Yee. All rights reserved. No license is granted to copy, modify, or redistribute this game or its assets.</footer>
+</main>
+</body>
+</html>
