@@ -95,20 +95,41 @@ body {
 <meta name="apple-mobile-web-app-capable" content="yes"><meta name="theme-color" content="#14121c"><script>(function () {
   var AC = window.AudioContext || window.webkitAudioContext;
   if (!AC) return;
+  var Q = location.search || '';
+  var DEBUG = /[?&]audiodebug=1/.test(Q);
   var ctxs = [];
-  function Wrapped(opts) {
+  window.__ncAudio = ctxs;
+  var D = window.__ncAudioDbg = {
+    gestures: 0, resumes: 0, resumeOk: 0, resumeErr: '', srcStarts: 0, worklets: 0,
+    modules: '', peak: 0, gate: 'none', early: false, errors: []
+  };
+  var early = null;
+
+  function make(opts, why) {
     opts = Object.assign({}, opts || {});
-    delete opts.sampleRate;
+    delete opts.sampleRate;           // native rate: iOS can be 44.1k or 48k
+    if (!opts.latencyHint) opts.latencyHint = 'interactive';
     var c = new AC(opts);
+    c.__ncWhy = why;
     ctxs.push(c);
+    if (DEBUG) instrument(c);
     return c;
+  }
+  function Wrapped(opts) {
+    if (early && !early.__ncTaken && early.state !== 'closed') {
+      early.__ncTaken = true;         // hand the gesture-born context to Godot
+      return early;
+    }
+    return make(opts, 'engine');
   }
   Wrapped.prototype = AC.prototype;
   window.AudioContext = Wrapped;
   if (window.webkitAudioContext) window.webkitAudioContext = Wrapped;
-  window.__ncAudio = ctxs;
 
-  try { if (navigator.audioSession) navigator.audioSession.type = 'playback'; } catch (e) {}
+  function setSession() {
+    try { if (navigator.audioSession && navigator.audioSession.type !== 'playback') navigator.audioSession.type = 'playback'; } catch (e) {}
+  }
+  setSession();
 
   function silentWav() {
     var n = 800, b = new Uint8Array(44 + n), v = new DataView(b.buffer);
@@ -123,6 +144,7 @@ body {
   }
   var tag = null;
   function sessionTag() {
+    if (navigator.audioSession) return;   // iOS 17+: the session API is enough
     if (!tag) {
       tag = document.createElement('audio');
       tag.setAttribute('x-webkit-airplay', 'deny');
@@ -137,41 +159,184 @@ body {
     }
   }
 
+  function prime(c) {
+    try {
+      var src = c.createBufferSource();
+      src.buffer = c.createBuffer(1, 1, c.sampleRate);
+      src.connect(c.destination);
+      src.start(0);
+    } catch (e) { D.errors.push('prime: ' + e); }
+  }
+  function resume(c) {
+    if (c.state === 'running' || c.state === 'closed') return;
+    D.resumes++;
+    try {
+      var r = c.resume();
+      if (r && r.then) r.then(function () { D.resumeOk++; }, function (e) { D.resumeErr = String(e); });
+    } catch (e) { D.resumeErr = String(e); }
+  }
   function unlock() {
-    sessionTag();
+    D.gestures++;
+    setSession();
+    if (!early && ctxs.length === 0) {
+      try { early = make({}, 'gesture'); D.early = true; } catch (e) { D.errors.push('create: ' + e); }
+    }
     for (var i = 0; i < ctxs.length; i++) {
       var c = ctxs[i];
       if (c.state === 'closed') continue;
-      if (c.state !== 'running') {
-        var r = c.resume();
-        if (r && r.catch) r.catch(function () {});
-      }
-      if (!c.__ncPrimed) {
-        try {
-          var src = c.createBufferSource();
-          src.buffer = c.createBuffer(1, 1, c.sampleRate);
-          src.connect(c.destination);
-          src.start(0);
-          c.__ncPrimed = true;
-        } catch (e) {}
-      }
+      if (c.state !== 'running') { resume(c); prime(c); }
+      else if (!c.__ncPrimed) { prime(c); }
+      c.__ncPrimed = true;
     }
+    sessionTag();
   }
-  ['touchend', 'click', 'keydown', 'pointerup', 'mousedown'].forEach(function (ev) {
+  ['touchend', 'click', 'keydown', 'pointerup', 'mouseup'].forEach(function (ev) {
     window.addEventListener(ev, unlock, { capture: true, passive: true });
   });
   document.addEventListener('visibilitychange', function () {
     if (document.hidden) {
       if (tag && !tag.paused) tag.pause();
     } else {
-      for (var i = 0; i < ctxs.length; i++) {
-        if (ctxs[i].state !== 'running' && ctxs[i].state !== 'closed') {
-          var r = ctxs[i].resume();
-          if (r && r.catch) r.catch(function () {});
-        }
-      }
+      for (var i = 0; i < ctxs.length; i++) resume(ctxs[i]);
     }
   });
+
+  var touchy = (navigator.maxTouchPoints > 0) || ('ontouchstart' in window);
+  var gateOn = /[?&]audiogate=1/.test(Q) || (touchy && !/[?&]audiogate=0/.test(Q));
+  function hookEngine() {
+    var G = window.Godot;
+    if (typeof G !== 'function' || G.__ncHooked) return;
+    var W = function (cfg) {
+      return G.apply(this, arguments).then(function (m) {
+        var cm = m && m.callMain;
+        if (typeof cm !== 'function') return m;
+        m.callMain = function () {
+          var me = this, args = arguments;
+          if (!gateOn || early || ctxs.length) { D.gate = 'skipped'; return cm.apply(me, args); }
+          D.gate = 'shown';
+          var ov = document.createElement('div');
+          ov.id = 'nc-tap';
+          ov.setAttribute('style', 'position:fixed;inset:0;z-index:2147483000;display:flex;flex-direction:column;' +
+            'align-items:center;justify-content:center;background:rgba(14,12,22,.92);color:#fff;' +
+            'font:700 28px system-ui,-apple-system,sans-serif;text-align:center;cursor:pointer;' +
+            '-webkit-user-select:none;user-select:none;touch-action:manipulation');
+          ov.innerHTML = '<div style="font-size:54px;line-height:1">&#128266;</div>' +
+            '<div style="margin-top:14px">Tap to start</div>' +
+            '<div style="margin-top:8px;font:400 15px system-ui,sans-serif;opacity:.7">(turns on sound)</div>';
+          var done = false;
+          function go(ev) {
+            if (done) return;
+            done = true;
+            unlock();                       // creates + resumes the context in this gesture
+            D.gate = 'tapped';
+            if (ev && ev.cancelable) ev.preventDefault();
+            ov.remove();
+            var c = document.getElementById('canvas');
+            if (c && c.focus) c.focus();
+            try { cm.apply(me, args); } catch (e) { if (e !== 'unwind' && !(e && e.name === 'ExitStatus')) throw e; }
+          }
+          ov.addEventListener('touchend', go, { passive: false });
+          ov.addEventListener('click', go);
+          document.body.appendChild(ov);
+        };
+        return m;
+      });
+    };
+    W.__ncHooked = true;
+    window.Godot = W;
+  }
+  if (window.MutationObserver) {
+    var mo = new MutationObserver(function (ms) {
+      for (var i = 0; i < ms.length; i++) for (var j = 0; j < ms[i].addedNodes.length; j++) {
+        var n = ms[i].addedNodes[j];
+        if (n.tagName === 'SCRIPT' && n.src) n.addEventListener('load', hookEngine);
+      }
+    });
+    mo.observe(document.documentElement, { childList: true, subtree: true });
+    document.addEventListener('DOMContentLoaded', function () { mo.disconnect(); });
+  }
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', hookEngine);
+  else setTimeout(hookEngine, 0);
+
+  if (!DEBUG) return;
+  function instrument(c) {
+    try {
+      var an = c.createAnalyser();
+      an.fftSize = 512;
+      c.__ncAn = an;
+      c.__ncBuf = new Float32Array(an.fftSize);
+      var conn = AudioNode.prototype.connect;
+      if (!AudioNode.prototype.__ncConn) {
+        AudioNode.prototype.__ncConn = conn;
+        AudioNode.prototype.connect = function (dst) {
+          var r = conn.apply(this, arguments);
+          try {
+            if (dst && dst === this.context.destination && this.context.__ncAn && this !== this.context.__ncAn) conn.call(this, this.context.__ncAn);
+          } catch (e) {}
+          return r;
+        };
+      }
+      if (c.audioWorklet && c.audioWorklet.addModule) {
+        var am = c.audioWorklet.addModule.bind(c.audioWorklet);
+        c.audioWorklet.addModule = function (u) {
+          var name = String(u).split('/').pop();
+          D.modules += name + ':loading ';
+          return am(u).then(function (v) { D.modules = D.modules.replace(name + ':loading', name + ':ok'); return v; },
+            function (e) { D.modules = D.modules.replace(name + ':loading', name + ':FAILED(' + e + ')'); throw e; });
+        };
+      }
+    } catch (e) { D.errors.push('instrument: ' + e); }
+  }
+  var st = AudioBufferSourceNode.prototype.start;
+  AudioBufferSourceNode.prototype.start = function () { D.srcStarts++; return st.apply(this, arguments); };
+  if (window.AudioWorkletNode) {
+    var W = window.AudioWorkletNode;
+    var W2 = function (c, n, o) { D.worklets++; return new W(c, n, o); };
+    W2.prototype = W.prototype;
+    window.AudioWorkletNode = W2;
+  }
+  D.snapshot = function () {
+    var out = [];
+    for (var i = 0; i < ctxs.length; i++) {
+      var c = ctxs[i], pk = 0;
+      if (c.__ncAn) {
+        c.__ncAn.getFloatTimeDomainData(c.__ncBuf);
+        for (var j = 0; j < c.__ncBuf.length; j++) pk = Math.max(pk, Math.abs(c.__ncBuf[j]));
+      }
+      D.peak = Math.max(D.peak * 0.9, pk);
+      out.push({ why: c.__ncWhy, state: c.state, rate: c.sampleRate, t: +c.currentTime.toFixed(2),
+        base: c.baseLatency ? +(c.baseLatency * 1000).toFixed(1) : null, out: c.outputLatency ? +(c.outputLatency * 1000).toFixed(1) : null,
+        peak: +pk.toFixed(3) });
+    }
+    return { ctx: out, gestures: D.gestures, resumes: D.resumes, resumeOk: D.resumeOk, resumeErr: D.resumeErr, srcStarts: D.srcStarts,
+      worklets: D.worklets, modules: D.modules, gate: D.gate, early: D.early, peakHold: +D.peak.toFixed(3),
+      session: navigator.audioSession ? navigator.audioSession.type : 'n/a', errors: D.errors.slice(-3), godot: window.__nc || null };
+  };
+  function show() {
+    var el = document.getElementById('nc-audiodbg');
+    if (!el) {
+      if (!document.body) return;
+      el = document.createElement('pre');
+      el.id = 'nc-audiodbg';
+      el.setAttribute('style', 'position:fixed;left:4px;top:4px;z-index:2147483600;margin:0;padding:6px 8px;max-width:60vw;' +
+        'background:rgba(0,0,0,.72);color:#7CFC9A;font:11px/1.35 ui-monospace,Menlo,monospace;pointer-events:none;white-space:pre-wrap;border-radius:6px');
+      document.body.appendChild(el);
+    }
+    var s = D.snapshot(), g = s.godot || {}, L = [];
+    L.push('AUDIO DEBUG  ' + navigator.userAgent.replace(/^.*?\(([^)]*)\).*$/, '$1').slice(0, 40));
+    if (!s.ctx.length) L.push('AudioContext: (not created yet)');
+    s.ctx.forEach(function (c, i) {
+      L.push('ctx' + i + ' [' + c.why + '] ' + c.state.toUpperCase() + '  ' + c.rate + ' Hz  t=' + c.t + 's  lat=' + c.base + '/' + c.out + 'ms  peak=' + c.peak);
+    });
+    L.push('gate=' + s.gate + ' gestures=' + s.gestures + ' resume=' + s.resumes + '/' + s.resumeOk + (s.resumeErr ? ' ERR ' + s.resumeErr : '') + ' session=' + s.session);
+    L.push('worklets=' + s.worklets + ' srcStarts=' + s.srcStarts + ' peakHold=' + s.peakHold);
+    L.push('modules: ' + (s.modules || '-'));
+    if (s.godot) L.push('godot: pb=' + g.pb + ' driver=' + g.audio + ' mix=' + g.mix + ' sounds=' + g.snd + ' last=' + g.snd_last + ' master=' + g.master_db + 'dB' + (g.master_mute ? ' MUTED' : '') + ' vol=' + g.vol);
+    else L.push('godot: (engine not running yet)');
+    if (s.errors.length) L.push('errors: ' + s.errors.join(' | '));
+    el.textContent = L.join('\n');
+  }
+  setInterval(show, 500);
 })();</script>
 	</head>
 	<body>
@@ -191,7 +356,7 @@ body {
 
 		<script src="index.js"></script>
 		<script>
-const GODOT_CONFIG = {"args":[],"canvasResizePolicy":2,"emscriptenPoolSize":8,"ensureCrossOriginIsolationHeaders":true,"executable":"index","experimentalVK":false,"fileSizes":{"index.pck":71034588,"index.wasm":39514754},"focusCanvas":true,"gdextensionLibs":[],"godotPoolSize":4};
+const GODOT_CONFIG = {"args":[],"canvasResizePolicy":2,"emscriptenPoolSize":8,"ensureCrossOriginIsolationHeaders":true,"executable":"index","experimentalVK":false,"fileSizes":{"index.pck":71041532,"index.wasm":39514754},"focusCanvas":true,"gdextensionLibs":[],"godotPoolSize":4};
 const GODOT_THREADS_ENABLED = false;
 const engine = new Engine(GODOT_CONFIG);
 
