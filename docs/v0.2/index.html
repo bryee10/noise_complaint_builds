@@ -97,6 +97,7 @@ body {
   if (!AC) return;
   var Q = location.search || '';
   var DEBUG = /[?&]audiodebug=1/.test(Q);
+  var MODE = ((/[?&]audiomode=(stream|sample|js)/.exec(Q) || [])[1]) || 'js';
   var ctxs = [];
   window.__ncAudio = ctxs;
   var D = window.__ncAudioDbg = {
@@ -132,25 +133,26 @@ body {
   setSession();
 
   function silentWav() {
-    var n = 800, b = new Uint8Array(44 + n), v = new DataView(b.buffer);
+    var n = 16000, b = new Uint8Array(44 + n), v = new DataView(b.buffer);
     function s(o, t) { for (var i = 0; i < t.length; i++) b[o + i] = t.charCodeAt(i); }
     s(0, 'RIFF'); v.setUint32(4, 36 + n, true); s(8, 'WAVEfmt ');
     v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
-    v.setUint32(24, 8000, true); v.setUint32(28, 8000, true); v.setUint16(32, 1, true);
-    v.setUint16(34, 8, true); s(36, 'data'); v.setUint32(40, n, true);
-    b.fill(128, 44);
+    v.setUint32(24, 8000, true); v.setUint32(28, 16000, true); v.setUint16(32, 2, true);
+    v.setUint16(34, 16, true); s(36, 'data'); v.setUint32(40, n, true);
     var bin = ''; for (var j = 0; j < b.length; j++) bin += String.fromCharCode(b[j]);
     return 'data:audio/wav;base64,' + btoa(bin);
   }
+  var appleTouch = /iP(hone|ad|od)/.test(navigator.userAgent) || (/Macintosh/.test(navigator.userAgent) && navigator.maxTouchPoints > 1);
   var tag = null;
   function sessionTag() {
-    if (navigator.audioSession) return;   // iOS 17+: the session API is enough
+    if (navigator.audioSession || !appleTouch) return;
     if (!tag) {
       tag = document.createElement('audio');
       tag.setAttribute('x-webkit-airplay', 'deny');
       tag.setAttribute('playsinline', '');
       tag.preload = 'auto';
       tag.loop = true;
+      tag.muted = false;
       tag.src = silentWav();
     }
     if (tag.paused && !document.hidden) {
@@ -201,6 +203,133 @@ body {
     }
   });
 
+  var S = { data: {}, bufs: {}, voices: {}, nextId: 1, oneshots: [], played: 0, dropped: 0, last: '', graph: null };
+  function sctx() {
+    if (MODE !== 'js' || !early || early.state === 'closed') return null;
+    return early;
+  }
+  function graph(c) {
+    if (S.graph && S.graph.c === c) return S.graph;
+    var comp = c.createDynamicsCompressor();          // prototype: -14 dB, 6:1
+    comp.threshold.value = -14; comp.ratio.value = 6; comp.attack.value = 0.003; comp.release.value = 0.2;
+    var master = c.createGain(); master.gain.value = 0.9;
+    master.connect(comp); comp.connect(c.destination);
+    var an = c.createAnalyser(); an.fftSize = 1024; comp.connect(an);
+    var below = c.createBiquadFilter(); below.type = 'lowpass'; below.frequency.value = 650; below.Q.value = 0.7;
+    var belowIn = c.createGain(); belowIn.gain.value = 1.25; belowIn.connect(below); below.connect(master);
+    S.graph = { c: c, master: master, comp: comp, an: an, abuf: new Float32Array(an.fftSize), buses: { SFX: master, Music: master, Below: belowIn, Master: master } };
+    return S.graph;
+  }
+  function buffer(c, name) {
+    var d = S.data[name];
+    if (!d) return null;
+    var key = name;
+    var b = S.bufs[key];
+    if (b && b.__c === c) return b;
+    b = c.createBuffer(1, d.pcm.length, d.rate);
+    b.getChannelData(0).set(d.pcm);
+    b.__c = c;
+    S.bufs[key] = b;
+    return b;
+  }
+  function voice(c, name, vol, pitch, pan, bus, loop) {
+    var b = buffer(c, name);
+    if (!b) return 0;
+    var g = graph(c);
+    var src = c.createBufferSource();
+    src.buffer = b;
+    src.playbackRate.value = Math.max(0.05, pitch || 1);
+    var gn = c.createGain();
+    gn.gain.value = Math.max(0, vol);
+    var out = gn;
+    src.connect(gn);
+    if (c.createStereoPanner) {
+      var pn = c.createStereoPanner();
+      pn.pan.value = Math.max(-1, Math.min(1, pan || 0));
+      gn.connect(pn); out = pn;
+    }
+    out.connect(g.buses[bus] || g.master);
+    var d = S.data[name];
+    if (loop) {
+      src.loop = true;
+      if (d.loopEnd > d.loopBegin) { src.loopStart = d.loopBegin / d.rate; src.loopEnd = d.loopEnd / d.rate; }
+    }
+    var id = S.nextId++;
+    var v = { id: id, src: src, gain: gn, pan: out !== gn ? out : null, loop: !!loop, name: name };
+    S.voices[id] = v;
+    src.onended = function () { try { out.disconnect(); } catch (e) {} delete S.voices[id]; };
+    src.start();
+    S.played++; S.last = name;
+    return v;
+  }
+  window.ncSfx = {
+    mode: MODE,
+    load: function (name, b64, rate, loopBegin, loopEnd) {
+      try {
+        var bin = atob(b64), n = bin.length >> 1, pcm = new Float32Array(n);
+        for (var i = 0; i < n; i++) {
+          var x = bin.charCodeAt(2 * i) | (bin.charCodeAt(2 * i + 1) << 8);
+          pcm[i] = (x >= 32768 ? x - 65536 : x) / 32768;
+        }
+        S.data[name] = { pcm: pcm, rate: rate || 32000, loopBegin: loopBegin || 0, loopEnd: loopEnd || 0 };
+        delete S.bufs[name];
+        return n;
+      } catch (e) { D.errors.push('load ' + name + ': ' + e); return -1; }
+    },
+    ready: function () { var c = sctx(); return c && c.state === 'running' ? 1 : 0; },
+    play: function (name, vol, pitch, pan, bus) {
+      var c = sctx();
+      if (!c || c.state !== 'running' || vol <= 0.002) { S.dropped++; return 0; }
+      S.oneshots = S.oneshots.filter(function (v) { return S.voices[v.id]; });
+      while (S.oneshots.length >= 40) { var o = S.oneshots.shift(); try { o.src.stop(); } catch (e) {} }
+      var v = voice(c, name, vol, pitch, pan, bus, false);
+      if (!v) return 0;
+      S.oneshots.push(v);
+      return v.id;
+    },
+    loop: function (name, vol, pitch, pan, bus) {
+      var c = sctx();
+      if (!c || c.state !== 'running') return 0;
+      var v = voice(c, name, 0, pitch, pan, bus, true);
+      if (!v) return 0;
+      v.gain.gain.setTargetAtTime(Math.max(0, vol), c.currentTime, 0.03);
+      return v.id;
+    },
+    update: function (id, vol, pitch, pan) {
+      var v = S.voices[id], c = sctx();
+      if (!v || !c) return 0;
+      var t = c.currentTime;
+      v.gain.gain.setTargetAtTime(Math.max(0, vol), t, 0.04);
+      v.src.playbackRate.setTargetAtTime(Math.max(0.05, pitch || 1), t, 0.04);
+      if (v.pan) v.pan.pan.setTargetAtTime(Math.max(-1, Math.min(1, pan || 0)), t, 0.04);
+      return 1;
+    },
+    stop: function (id) {
+      var v = S.voices[id], c = sctx();
+      if (!v) return 0;
+      try {
+        if (c) { v.gain.gain.setTargetAtTime(0, c.currentTime, 0.02); v.src.stop(c.currentTime + 0.1); }
+        else v.src.stop();
+      } catch (e) {}
+      delete S.voices[id];
+      return 1;
+    },
+    stopAll: function () { for (var k in S.voices) window.ncSfx.stop(+k); },
+    setMaster: function (vol) { var c = sctx(); if (c) graph(c).master.gain.setTargetAtTime(Math.max(0, vol) * 0.9, c.currentTime, 0.03); },
+    peak: function () {
+      var c = sctx(); if (!c || !S.graph) return 0;
+      var g = S.graph; g.an.getFloatTimeDomainData(g.abuf);
+      var p = 0; for (var i = 0; i < g.abuf.length; i++) p = Math.max(p, Math.abs(g.abuf[i]));
+      return p;
+    },
+    stats: function () {
+      var c = sctx(), loops = 0, n = 0;
+      for (var k in S.voices) { n++; if (S.voices[k].loop) loops++; }
+      return { mode: MODE, state: c ? c.state : 'none', rate: c ? c.sampleRate : 0, loaded: Object.keys(S.data).length,
+        voices: n, loops: loops, played: S.played, dropped: S.dropped, last: S.last };
+    }
+  };
+
   var touchy = (navigator.maxTouchPoints > 0) || ('ontouchstart' in window);
   var gateOn = /[?&]audiogate=1/.test(Q) || (touchy && !/[?&]audiogate=0/.test(Q));
   function hookEngine() {
@@ -210,8 +339,13 @@ body {
       return G.apply(this, arguments).then(function (m) {
         var cm = m && m.callMain;
         if (typeof cm !== 'function') return m;
-        m.callMain = function () {
+        m.callMain = function (a0) {
           var me = this, args = arguments;
+          if (MODE === 'js') {
+            var al = Array.prototype.slice.call(a0 || []);
+            if (al.indexOf('--audio-driver') < 0) al.push('--audio-driver', 'Dummy');
+            args = [al];
+          }
           if (!gateOn || early || ctxs.length) { D.gate = 'skipped'; return cm.apply(me, args); }
           D.gate = 'shown';
           var ov = document.createElement('div');
@@ -331,12 +465,41 @@ body {
     L.push('gate=' + s.gate + ' gestures=' + s.gestures + ' resume=' + s.resumes + '/' + s.resumeOk + (s.resumeErr ? ' ERR ' + s.resumeErr : '') + ' session=' + s.session);
     L.push('worklets=' + s.worklets + ' srcStarts=' + s.srcStarts + ' peakHold=' + s.peakHold);
     L.push('modules: ' + (s.modules || '-'));
+    if (window.ncSfx) { var x = window.ncSfx.stats(); L.push('ncSfx: mode=' + x.mode + ' ' + x.state + ' ' + x.rate + 'Hz loaded=' + x.loaded + ' voices=' + x.voices + ' loops=' + x.loops + ' played=' + x.played + ' dropped=' + x.dropped + ' last=' + x.last + ' peak=' + window.ncSfx.peak().toFixed(3)); }
     if (s.godot) L.push('godot: pb=' + g.pb + ' driver=' + g.audio + ' mix=' + g.mix + ' sounds=' + g.snd + ' last=' + g.snd_last + ' master=' + g.master_db + 'dB' + (g.master_mute ? ' MUTED' : '') + ' vol=' + g.vol);
     else L.push('godot: (engine not running yet)');
     if (s.errors.length) L.push('errors: ' + s.errors.join(' | '));
     el.textContent = L.join('\n');
   }
   setInterval(show, 500);
+})();
+
+(function () {
+  var lbl = null, t0 = Date.now();
+  var iv = setInterval(function () {
+    var pr = document.getElementById('status-progress');
+    if (!pr) return;
+    var st = document.getElementById('status');
+    if (st && (st.style.visibility === 'hidden' || st.style.display === 'none' || getComputedStyle(pr).display === 'none')) {
+      if (lbl) lbl.remove();
+      clearInterval(iv);
+      return;
+    }
+    if (!lbl) {
+      lbl = document.createElement('div');
+      lbl.id = 'nc-load';
+      lbl.setAttribute('style', 'margin-top:10px;color:#e8e3f5;font:600 15px system-ui,-apple-system,sans-serif;text-align:center');
+      pr.parentNode.insertBefore(lbl, pr.nextSibling);
+    }
+    var v = +pr.getAttribute('value') || 0, m = +pr.getAttribute('max') || 0;
+    var txt = 'Loading the apartment...';
+    if (m > 0) {
+      var pct = Math.min(100, Math.floor(100 * v / m));
+      txt = pct >= 100 ? 'Starting...' : 'Downloading ' + (v / 1048576).toFixed(0) + ' / ' + (m / 1048576).toFixed(0) + ' MB (' + pct + '%)';
+    }
+    lbl.textContent = txt;
+    window.__ncDl = { v: v, m: m, ms: Date.now() - t0 };
+  }, 150);
 })();</script>
 	</head>
 	<body>
@@ -356,7 +519,7 @@ body {
 
 		<script src="index.js"></script>
 		<script>
-const GODOT_CONFIG = {"args":[],"canvasResizePolicy":2,"emscriptenPoolSize":8,"ensureCrossOriginIsolationHeaders":true,"executable":"index","experimentalVK":false,"fileSizes":{"index.pck":71041532,"index.wasm":39514754},"focusCanvas":true,"gdextensionLibs":[],"godotPoolSize":4};
+const GODOT_CONFIG = {"args":[],"canvasResizePolicy":2,"emscriptenPoolSize":8,"ensureCrossOriginIsolationHeaders":true,"executable":"index","experimentalVK":false,"fileSizes":{"index.pck":60141004,"index.wasm":39514754},"focusCanvas":true,"gdextensionLibs":[],"godotPoolSize":4};
 const GODOT_THREADS_ENABLED = false;
 const engine = new Engine(GODOT_CONFIG);
 
